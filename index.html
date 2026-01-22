@@ -60,9 +60,13 @@
     <label>Segments (max 10): <input id="numSegments" type="number" min="1" max="10" value="2"></label>
     <button class="primary" onclick="buildBeam()">Build Beam</button>
     <button onclick="solveBeam()">Solve</button>
-    <button onclick="exportJSON()">Export JSON</button>
-    <button onclick="exportCSV()">Export CSV</button>
-    <label>EI height scale: <input id="eiScale" type="number" step="0.01" value="1.00" style="width:70px"></label>
+    
+  <button onclick="exportJSON()">Export JSON</button>
+<button onclick="importJSON()">Import JSON</button>
+<button onclick="exportCSV()">Export CSV</button>  
+
+
+<label>EI height scale: <input id="eiScale" type="number" step="0.01" value="1.00" style="width:70px"></label>
   </div>
 
   <div id="stage">
@@ -867,64 +871,137 @@
     }
 
     // -------------------- EXPORT LOGIC --------------------
-    function exportJSON(){
-        if(!elementForces){ Swal.fire('Note','Solve first','info'); return; }
+
+function exportJSON(){
+    if(!elementForces){ Swal.fire('Note','Solve first','info'); return; }
+    
+    const results = [];
+    let xTot = 0;
+    const { u, map } = lastU;
+
+    segments.forEach((s, e) => {
+        const L = s.L;
+        const qw = -s.wd*s.A, qL = s.qL+qw, qR = s.qR+qw;
+        const uVals = [u[map.idxW[e]], u[map.thRight[e]], u[map.idxW[e+1]], u[map.thLeft[e+1]]];
+        const f = elementForces[e];
         
-        const results = [];
-        let xTot = 0;
-        const { u, map } = lastU;
-
-        segments.forEach((s, e) => {
-            const L = s.L;
-            const qw = -s.wd*s.A, qL = s.qL+qw, qR = s.qR+qw;
-            const uVals = [u[map.idxW[e]], u[map.thRight[e]], u[map.idxW[e+1]], u[map.thLeft[e+1]]];
-            const f = elementForces[e];
+        // 20 points per segment
+        for(let i=0; i<=20; i++){
+            const xi = i*L/20;
+            const r = xi/L;
             
-            // 20 points per segment
-            for(let i=0; i<=20; i++){
-                const xi = i*L/20;
-                const r = xi/L;
-                
-                // Displacement
-                const h = [1-3*r*r+2*r*r*r, xi*(1-2*r+r*r), 3*r*r-2*r*r*r, xi*(r*r-r)];
-                const w = h.reduce((acc, val, k) => acc + val*uVals[k], 0);
-                
-                // Shear
-                const V = f.V1 - (qL*xi + (qR-qL)*xi*xi/(2*L));
-                
-                // Moment
-                const M = -f.M2 + f.V1*(L-xi) - 0.5*qL*(L**2-xi**2) - ((qR-qL)/(6*L))*(L**3-xi**3);
-                
-                // Stress
-                const sigT = s.St ? -M/s.St : null;
-                const sigB = s.Sb ? M/s.Sb : null;
+            // Displacement
+            const h = [1-3*r*r+2*r*r*r, xi*(1-2*r+r*r), 3*r*r-2*r*r*r, xi*(r*r-r)];
+            const w = h.reduce((acc, val, k) => acc + val*uVals[k], 0);
+            
+            // Shear
+            const V = f.V1 - (qL*xi + (qR-qL)*xi*xi/(2*L));
+            
+            // Moment
+            const M = -f.M2 + f.V1*(L-xi) - 0.5*qL*(L**2-xi**2) - ((qR-qL)/(6*L))*(L**3-xi**3);
+            
+            // Stress
+            const sigT = s.St ? -M/s.St : null;
+            const sigB = s.Sb ? M/s.Sb : null;
 
-                results.push({
-                    x: parseFloat((xTot + xi).toFixed(4)),
-                    displacement: parseFloat(w.toPrecision(5)),
-                    shear: parseFloat(V.toPrecision(5)),
-                    moment: parseFloat(M.toPrecision(5)),
-                    sigma_top: sigT !== null ? parseFloat(sigT.toPrecision(5)) : null,
-                    sigma_bottom: sigB !== null ? parseFloat(sigB.toPrecision(5)) : null
+            results.push({
+                x: parseFloat((xTot + xi).toFixed(4)),
+                displacement: parseFloat(w.toPrecision(5)),
+                shear: parseFloat(V.toPrecision(5)),
+                moment: parseFloat(M.toPrecision(5)),
+                sigma_top: sigT !== null ? parseFloat(sigT.toPrecision(5)) : null,
+                sigma_bottom: sigB !== null ? parseFloat(sigB.toPrecision(5)) : null
+            });
+        }
+        xTot += L;
+    });
+
+    const dataObj = {
+        version: "1.0",
+        date: new Date().toLocaleDateString(),
+        time: new Date().toLocaleTimeString(),
+        unitSystem: unitSystem,
+        configuration: {
+            segments: segments,
+            nodes: nodes
+        },
+        results: results
+    };
+
+    const blob = new Blob([JSON.stringify(dataObj, null, 2)], {type: 'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `beam_results_${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+
+function importJSON(){
+    // Create a file input element
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.json,application/json';
+    
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const data = JSON.parse(event.target.result);
+                
+                // Validate it's our format
+                if (!data.configuration || !data.configuration.segments || !data.configuration.nodes) {
+                    Swal.fire('Invalid Format', 'This JSON file does not contain valid beam configuration data.', 'error');
+                    return;
+                }
+                
+                // Restore unit system if present
+                if (data.unitSystem) {
+                    unitSystem = data.unitSystem;
+                }
+                
+                // Restore segments and nodes
+                segments = JSON.parse(JSON.stringify(data.configuration.segments));
+                nodes = JSON.parse(JSON.stringify(data.configuration.nodes));
+                
+                // Ensure segments are normalized (back-compat)
+                normalizeSegments();
+                
+                // Update the UI
+                document.getElementById('numSegments').value = segments.length;
+                
+                // Clear previous solution
+                elementForces = null;
+                K_global = null;
+                lastU = null;
+                clearAllPlots();
+                
+                // Redraw the beam
+                drawBeam();
+                
+                Swal.fire({
+                    icon: 'success',
+                    title: 'Configuration Imported',
+                    text: `Loaded ${segments.length} segment(s) and ${nodes.length} node(s). Click "Solve" to recalculate.`,
+                    timer: 3000
                 });
+                
+            } catch (err) {
+                Swal.fire('Error', 'Failed to parse JSON file: ' + err.message, 'error');
             }
-            xTot += L;
-        });
-
-        const dataObj = {
-            version: "1.0",
-            date: new Date().toLocaleDateString(),
-            time: new Date().toLocaleTimeString(),
-            results: results
         };
+        
+        reader.readAsText(file);
+    });
+    
+    // Trigger the file picker
+    fileInput.click();
+}
 
-        const blob = new Blob([JSON.stringify(dataObj, null, 2)], {type: 'application/json'});
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = `beam_results_${Date.now()}.json`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-    }
+
 
     function exportCSV(){
         if(!elementForces){ Swal.fire('Note','Solve first','info'); return; }
@@ -949,19 +1026,21 @@
     }
 
     // Expose API
-    window.buildBeam = buildBeam;
-    window.solveBeam = solveBeam;
-    window.plotMoment = plotMoment;
-    window.plotShearFromMoment = plotShearFromMoment;
-    window.plotBendingStress = plotBendingStress;
-    window.clearAllPlots = clearAllPlots;
-    window.exportCSV = exportCSV;
-    window.exportJSON = exportJSON;
-
+// Expose API
+window.buildBeam = buildBeam;
+window.solveBeam = solveBeam;
+window.plotMoment = plotMoment;
+window.plotShearFromMoment = plotShearFromMoment;
+window.plotBendingStress = plotBendingStress;
+window.clearAllPlots = clearAllPlots;
+window.exportCSV = exportCSV;
+window.exportJSON = exportJSON;
+window.importJSON = importJSON;  // ADD THIS LINE
     // Safe initial build (DOM is already parsed because script is at end of body)
     try { buildBeam(); } catch(e) { console.error(e); }
   </script>
 </body>
 </html>
+
 
 
